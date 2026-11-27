@@ -25,7 +25,8 @@ use base64::{Engine, engine::general_purpose::STANDARD};
 use eyre::Result;
 use serde_json::Value;
 
-use crate::Archive;
+use crate::bundle::PartCheck;
+use crate::{Archive, Format};
 
 /// The system fields a line may carry.
 const SYSTEM_FIELDS: [&str; 7] = [
@@ -57,12 +58,15 @@ pub const MAX_LINE_BYTES: usize = 1 << 20;
 /// between hashing and importing it, and reads the archive once instead of
 /// twice.
 pub struct Entities<'a> {
+    format: &'a Format,
     parts: std::slice::Iter<'a, std::path::PathBuf>,
     current: Option<Part<'a>>,
     buf: Vec<u8>,
     /// `None` once an error ended the iteration.
     hasher: Option<Keccak256>,
     hash: Option<B256>,
+    /// A Sourcify bundle part's own checks: see [`crate::bundle`].
+    bundle: Option<PartCheck>,
 }
 
 /// The part being read.
@@ -81,11 +85,16 @@ impl Archive {
     /// and, for a bad field, the field; the iterator ends after it.
     pub fn entities(&self) -> Entities<'_> {
         Entities {
+            format: &self.format,
             parts: self.parts().iter(),
             current: None,
             buf: Vec::new(),
             hasher: Some(self.hasher()),
             hash: None,
+            bundle: match &self.format {
+                Format::Arkiv => None,
+                Format::Sourcify(part) => Some(PartCheck::new(part)),
+            },
         }
     }
 }
@@ -102,6 +111,12 @@ impl Entities<'_> {
     pub fn at(&self) -> Option<String> {
         let part = self.current.as_ref()?;
         Some(format!("{}:{}", part.path.display(), part.line))
+    }
+
+    /// The last line's nonce, for a line that gives one: a Sourcify bundle's.
+    /// The writer checks it against the creator's minting nonce.
+    pub fn nonce(&self) -> Option<u64> {
+        self.bundle.as_ref()?.nonce()
     }
 
     /// End the iteration: an archive with a bad line or part is never read past it.
@@ -158,6 +173,12 @@ impl Iterator for Entities<'_> {
                     let path = part.path.display().to_string();
                     return self.fail(eyre::eyre!("{path}: changed while it was read"));
                 }
+                if let (Some(check), Format::Sourcify(bundle)) = (&mut self.bundle, self.format)
+                    && let Err(e) = check.finish(bundle, part.len)
+                {
+                    let path = part.path.display().to_string();
+                    return self.fail(eyre::eyre!("{path}: {e}"));
+                }
                 self.current = None;
                 continue;
             }
@@ -167,6 +188,9 @@ impl Iterator for Entities<'_> {
                 ));
             }
             hasher.update(&self.buf);
+            if let Some(check) = &mut self.bundle {
+                check.update(&self.buf);
+            }
             part.read += n as u64;
             let line = match std::str::from_utf8(&self.buf) {
                 Ok(line) => line,
@@ -175,7 +199,11 @@ impl Iterator for Entities<'_> {
             if line.trim().is_empty() {
                 continue;
             }
-            return match parse_line(line) {
+            let parsed = match (&mut self.bundle, self.format) {
+                (Some(check), Format::Sourcify(bundle)) => check.line(bundle, line),
+                _ => parse_line(line),
+            };
+            return match parsed {
                 Ok(entity) => Some(Ok(entity)),
                 Err(e) => self.fail(eyre::eyre!("{at}: {e}")),
             };
@@ -326,7 +354,7 @@ fn parse_line(line: &str) -> Result<(UserAddress, Vec<Op>), String> {
 /// The name rules a transaction's attributes meet, checked by the decoder's
 /// own functions so the two cannot drift: not engine-controlled (no `$`), and a
 /// valid `Ident32` once padded to its 32 bytes.
-fn check_attribute_name(name: &str) -> Result<(), String> {
+pub(crate) fn check_attribute_name(name: &str) -> Result<(), String> {
     let bytes = name.as_bytes();
     if annotations::is_engine_controlled(bytes) {
         return Err(format!("{name:?}: the engine owns names starting with $"));
@@ -347,7 +375,7 @@ fn check_attribute_name(name: &str) -> Result<(), String> {
 /// The length limits a transaction's values meet, from the same constants as
 /// the decoder's: a longer value would otherwise get as far as the store and
 /// be refused there without its name.
-fn check_length(name: &str, value: &AttributeValue) -> Result<(), String> {
+pub(crate) fn check_length(name: &str, value: &AttributeValue) -> Result<(), String> {
     let (length, max) = match value {
         AttributeValue::Str(text) => (text.len(), MAX_STR_BYTES),
         AttributeValue::Bytes(bytes) => (bytes.len(), MAX_BYTES_VALUE_LEN),

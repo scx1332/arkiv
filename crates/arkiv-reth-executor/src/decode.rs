@@ -417,6 +417,7 @@ mod tests {
             chain_id,
             max_lifetime: 7_884_000,
             keep_writes: true,
+            allow_permanent: false,
         }
     }
 

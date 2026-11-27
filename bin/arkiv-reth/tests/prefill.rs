@@ -497,3 +497,188 @@ async fn a_finalize_that_cannot_write_the_genesis_file_is_finished_by_hand() {
     assert_eq!(block_hash(&client, 0).await, hash);
     assert_eq!(client.entity_count(None, None).await, 6);
 }
+
+// ── A Sourcify bundle ───────────────────────────────────────────────────────
+
+/// The committed Sourcify fixture, `crates/arkiv-prefill/fixtures/sourcify`:
+/// two parts, nine permanent entities of every kind the export writes, minted
+/// for the dev account `DEV_KEY_0` on chain 7706815.
+fn sourcify_fixture() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../crates/arkiv-prefill/fixtures/sourcify")
+}
+
+/// `arkiv-reth prefill --seed` on the bundle in `dir`, into the store
+/// `store` there, permanent entities allowed, with `extra` flags; its output.
+fn seed(dir: &Path, store: &str, extra: &[&str]) -> String {
+    let output = Command::new(BIN)
+        .arg("prefill")
+        .arg("--chain")
+        .arg(dir.join("genesis.json"))
+        .arg("--seed")
+        .arg(dir.join("seed.json"))
+        .arg("--allow-permanent")
+        .arg("--store")
+        .arg(dir.join(store))
+        .args(extra)
+        .output()
+        .expect("run arkiv-reth prefill");
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(
+        output.status.success(),
+        "arkiv-reth prefill --seed {extra:?} failed:\n{stdout}\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    stdout
+}
+
+/// A bundle line's attributes as the node's RPC returns them: `bytes` as hex
+/// rather than base64, everything else as written.
+fn rpc_attributes(line: &Value) -> (Vec<Value>, Vec<Value>) {
+    use base64::Engine;
+    let mut values = Vec::new();
+    let mut schema = Vec::new();
+    for attribute in line["attributes"].as_array().unwrap() {
+        let value = match attribute["type"].as_str().unwrap() {
+            "bytes" => {
+                let bytes = base64::engine::general_purpose::STANDARD
+                    .decode(attribute["value"].as_str().unwrap())
+                    .unwrap();
+                json!(alloy_primitives::hex::encode_prefixed(bytes))
+            }
+            _ => attribute["value"].clone(),
+        };
+        values
+            .push(json!({ "name": attribute["name"], "type": attribute["type"], "value": value }));
+        schema.push(json!({
+            "name": attribute["name"], "type": attribute["type"], "indexed": attribute["indexed"],
+        }));
+    }
+    (values, schema)
+}
+
+/// A Sourcify bundle, end to end: prefilled and finalized with the built
+/// binary, the same block 0 again from the same files into another store,
+/// and a node started on it that serves every line of the bundle exactly as
+/// written, answers queries by attribute, and carries on minting the owner's
+/// keys after the bundle's.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_node_serves_a_prefilled_sourcify_bundle() {
+    let work = tempfile::tempdir().unwrap();
+    let dir = work.path();
+    copy(&sourcify_fixture(), dir);
+    let written = seed(dir, "golemdb", &[]);
+    assert!(written.contains("2 of 2 parts in."), "{written}");
+    let finalized = seed(dir, "golemdb", &["--finalize"]);
+
+    let expected: Value = serde_json::from_str(
+        &std::fs::read_to_string(sourcify_fixture().join("expected.json")).unwrap(),
+    )
+    .unwrap();
+    let root: B256 = expected["root"].as_str().unwrap().parse().unwrap();
+    let hash: B256 = expected["blockZeroHash"].as_str().unwrap().parse().unwrap();
+    assert!(
+        finalized.contains(&format!("state root {root}, hash {hash}")),
+        "{finalized}"
+    );
+    // Seeding twice gives the same block 0: a second store from the same
+    // files matches the root the first wrote into the genesis file.
+    seed(dir, "again", &[]);
+    let again = seed(dir, "again", &["--finalize"]);
+    assert!(
+        again.contains(&format!("state root {root}, hash {hash}")) && again.contains("it matches"),
+        "{again}"
+    );
+
+    let signer: PrivateKeySigner = DEV_KEY_0.parse().unwrap();
+    let owner = signer.address();
+    let mut node = NodeBuilder::new(BIN)
+        .chain(dir.join("genesis.json"))
+        .golemdb_path(dir.join("golemdb"))
+        .spawn();
+    let client = connect(&node.http_url(), signer);
+    node.wait_ready(&client, READY).await;
+    let block_zero = client
+        .provider()
+        .get_block_by_number(0.into())
+        .await
+        .unwrap()
+        .expect("block 0");
+    assert_eq!(
+        (block_zero.header.hash, block_zero.header.state_root),
+        (hash, root)
+    );
+    client.wait_for_block(2, READY).await;
+
+    // Every line, as the node serves it.
+    let mut lines = 0;
+    for part in ["entities/000001.jsonl", "entities/000002.jsonl"] {
+        for text in std::fs::read_to_string(dir.join(part)).unwrap().lines() {
+            let line: Value = serde_json::from_str(text).unwrap();
+            let key: B256 = line["key"].as_str().unwrap().parse().unwrap();
+            let entity = client.get_entity(key).await;
+            let (attributes, schema) = rpc_attributes(&line);
+            assert_eq!(entity["key"], line["key"], "{entity}");
+            for who in ["owner", "creator"] {
+                let address: Address = entity[who].as_str().unwrap().parse().unwrap();
+                assert_eq!(address, owner, "{who} of {key}");
+            }
+            assert_eq!(hex_quantity(&entity["createdAt"]), 0, "{entity}");
+            assert_eq!(hex_quantity(&entity["expiresAt"]), u64::MAX, "{entity}");
+            assert_eq!(entity["attributes"], json!(attributes), "{key}");
+            let queried = client
+                .query_raw(
+                    &format!("$key = key({key:#x})"),
+                    json!({ "select": { "attributeSchema": true } }),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                queried["data"][0]["attributeSchema"],
+                json!(schema),
+                "{key}"
+            );
+            lines += 1;
+        }
+    }
+    assert_eq!(lines, 9);
+    assert_eq!(client.entity_count(None, None).await, 9);
+
+    // Queries by attribute: each kind's count is the report's, and a typed
+    // reference finds what names it.
+    let report: Value =
+        serde_json::from_str(&std::fs::read_to_string(dir.join("report.json")).unwrap()).unwrap();
+    for (kind, count) in report["kinds"].as_object().unwrap() {
+        let query = format!("arkiv.schema = str('sourcify.v4.{kind}')");
+        assert_eq!(
+            client.entity_count(Some(&query), None).await,
+            count.as_u64().unwrap(),
+            "{query}"
+        );
+    }
+    let greeter = client
+        .query("name = str('Greeter') AND optimizerruns = 200", 10, None)
+        .await;
+    assert_eq!(greeter["data"].as_array().unwrap().len(), 1, "{greeter}");
+
+    // The owner's next create mints the key of nonce 9, the first after the
+    // bundle's: no prefilled key is minted again.
+    let receipt = client
+        .execute(vec![Operation::create(0, 0, 100_000, 0, vec![])])
+        .await;
+    let created = receipt
+        .inner
+        .logs()
+        .iter()
+        .filter(|log| log.inner.address == ARKIV_ADDRESS)
+        .find_map(|log| IEntityRegistry::EntityCreated::decode_log(&log.inner).ok())
+        .expect("an EntityCreated log")
+        .entityKey;
+    let next = arkiv_reth_executor::derive_entity_address(
+        7_706_815,
+        &owner.0.0,
+        arkiv_interfaces::primitives::EntityCreationNonce::new(9),
+        0,
+    );
+    assert_eq!(created, B256::from(next));
+    assert_eq!(client.entity_count(None, None).await, 10);
+}

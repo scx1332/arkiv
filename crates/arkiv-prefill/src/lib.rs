@@ -35,6 +35,13 @@
 //! The order is the commit order. An archive named twice, or an empty list, is
 //! refused. See [`open_set`].
 //!
+//! # Sourcify bundles
+//!
+//! A prefill can instead take its archives from a Sourcify bundle, the
+//! Sourcify export's v4 format, read as it is published: its `seed.json` lists
+//! the parts, and each part is one archive. Its lines have their own format.
+//! See [`bundle`] and [`open_bundle`].
+//!
 //! # Parts
 //!
 //! A part is JSON Lines: one entity per line, one JSON object per entity. Blank
@@ -94,12 +101,14 @@ use alloy_primitives::{B256, Keccak256};
 use eyre::{Result, WrapErr, ensure};
 use serde::Deserialize;
 
+pub mod bundle;
 mod finalize;
 mod reader;
 mod run;
 #[cfg(test)]
 mod testkit;
 mod writer;
+pub use bundle::{Bundle, open_bundle};
 pub use finalize::{Finalized, finalize, set_prefilled_root};
 pub use reader::{Entities, MAX_LINE_BYTES};
 pub use run::{Prefill, Ran, run};
@@ -176,11 +185,24 @@ pub fn open_set(set: impl AsRef<Path>) -> Result<Vec<Archive>> {
 /// The index is read once, by [`Archive::open`]: the part list and the bytes
 /// that go into the hash come from that one read, so an index edited later
 /// cannot pair a new index with the old part list.
+///
+/// A [Sourcify bundle](bundle)'s part is an archive too: its `seed.json` is the
+/// index, and the part its only part.
 #[derive(Debug, Clone)]
 pub struct Archive {
     index: PathBuf,
     index_bytes: Vec<u8>,
     parts: Vec<PathBuf>,
+    format: Format,
+}
+
+/// How an archive's lines are written.
+#[derive(Debug, Clone)]
+pub(crate) enum Format {
+    /// This crate's format: `$` system fields and tagged attributes.
+    Arkiv,
+    /// One part of a Sourcify bundle: see [`bundle`].
+    Sourcify(Box<bundle::Part>),
 }
 
 impl Archive {
@@ -209,12 +231,22 @@ impl Archive {
             index,
             index_bytes,
             parts,
+            format: Format::Arkiv,
         })
     }
 
     /// The index file.
     pub fn index(&self) -> &Path {
         &self.index
+    }
+
+    /// What messages call the archive: its index file, or for a Sourcify
+    /// bundle's part, which shares its index with every other part, the part.
+    pub fn name(&self) -> &Path {
+        match &self.format {
+            Format::Arkiv => &self.index,
+            Format::Sourcify(part) => &part.path,
+        }
     }
 
     /// The parts, in order.

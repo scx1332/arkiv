@@ -36,6 +36,13 @@ pub struct ExecEnv {
     /// rather than a transaction (`eth_call`, `eth_estimateGas`): its writes
     /// are discarded like a reverted batch's, so one probe never sees another.
     pub keep_writes: bool,
+    /// Whether a create may set the permanent expiry, `u64::MAX`. No
+    /// transaction may: permanence is not sold, so this is `false` for every
+    /// transaction, call and estimate. Only a prefill that was asked to allow
+    /// permanent entities sets it (`arkiv-reth prefill --allow-permanent`).
+    /// Such a create is free like every prefilled one, so it buys no storage
+    /// time. Extends are unaffected.
+    pub allow_permanent: bool,
 }
 
 /// How an execution ended.

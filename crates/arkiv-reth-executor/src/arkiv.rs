@@ -234,7 +234,11 @@ impl<V: StateView, C: CostModel> ArkivExecutor<V, C> {
                 {
                     return Ok(Err(RevertReason::AlreadyExists { key: *key }));
                 }
-                if let Err(reason) = admit_lifetime(env, *expires_at) {
+                // A prefill allowed to may create a permanent entity, which no
+                // transaction can buy: it is outside the lifetime rule and,
+                // being free, buys no storage time (it has no end to price).
+                let permanent = env.allow_permanent && *expires_at == storage_time::PERMANENT;
+                if !permanent && let Err(reason) = admit_lifetime(env, *expires_at) {
                     return Ok(Err(reason));
                 }
                 let entity = Entity {
@@ -254,11 +258,11 @@ impl<V: StateView, C: CostModel> ArkivExecutor<V, C> {
                 );
                 // A create buys its whole size, which is all the write added,
                 // until it expires.
-                meter.buy(
-                    self.growth(&details).and_then(|units| {
+                if !permanent {
+                    meter.buy(self.growth(&details).and_then(|units| {
                         storage_time::create(units, *expires_at, env.block_number)
-                    }),
-                );
+                    }));
+                }
                 // The create's own minting-nonce step. The decoder derived this
                 // key from the nonce it read at the start of the transaction,
                 // from this same view, so the creates advance it in that order.
@@ -1280,6 +1284,7 @@ mod tests {
             chain_id: 1,
             max_lifetime: MAX_LIFETIME,
             keep_writes: true,
+            allow_permanent: false,
         }
     }
 
@@ -1388,6 +1393,54 @@ mod tests {
             .apply(&env(alice, 10), &mut view, &[create_until(1, u64::MAX)])
             .unwrap();
         assert_eq!(out.revert, Some(beyond(u64::MAX)), "permanent expiry");
+    }
+
+    /// A prefill allowed to may create a permanent entity, which buys no
+    /// storage time. The exemption is for exactly `u64::MAX` and for creates
+    /// only: one block short of permanent is still bound by `max_lifetime`,
+    /// and an extend to permanent still reverts.
+    #[test]
+    fn a_prefill_that_allows_it_creates_a_permanent_entity() {
+        let exec = ArkivExecutor::<View>::new(TEST_SCHEDULE);
+        let alice = [0xAA; 20];
+        let prefill = ExecEnv {
+            allow_permanent: true,
+            ..env(alice, 0)
+        };
+
+        let mut view = fresh_view();
+        let out = exec
+            .apply(&prefill, &mut view, &[create_until(1, u64::MAX)])
+            .unwrap();
+        assert_eq!(out.status, ExecStatus::Ok, "{:?}", out.revert);
+        assert_eq!(out.gas.storage_gas, 0, "permanence buys no storage time");
+        let entity = staged(&view, [1; 32]).expect("staged");
+        assert_eq!(entity.expires_at, u64::MAX);
+        assert_eq!(minting_nonce(&view, alice), 1, "the create's nonce step");
+
+        let beyond = |target| RevertReason::ExpiryBeyondMaxLifetime {
+            target,
+            current_block: 0,
+            max_lifetime: MAX_LIFETIME,
+        };
+        let mut view = fresh_view();
+        let out = exec
+            .apply(&prefill, &mut view, &[create_until(1, u64::MAX - 1)])
+            .unwrap();
+        assert_eq!(out.revert, Some(beyond(u64::MAX - 1)), "not permanent");
+
+        let mut view = seeded_view(&[owned_until(1, alice, 100)]);
+        let out = exec
+            .apply(
+                &prefill,
+                &mut view,
+                &[Op::ExtendExpiry {
+                    key: [1; 32],
+                    new_expires_at: u64::MAX,
+                }],
+            )
+            .unwrap();
+        assert_eq!(out.revert, Some(beyond(u64::MAX)), "an extend to permanent");
     }
 
     /// The bound is on the lifetime an extend leaves, not on the blocks it

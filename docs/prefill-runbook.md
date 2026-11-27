@@ -52,6 +52,8 @@ ARKIV_STORE_PATH=/tmp/prefill/golemdb arkiv-reth node --chain genesis.json --dat
 
 The genesis file and the archives fix block 0 completely: the same files give the same root and hash on any machine.
 
+**A Sourcify bundle instead of archives.** The Sourcify export's v4 bundle (`seed.json`, `report.json` and JSON Lines parts) is prefilled as it is published, with `--seed seed.json` in place of `--archives set.json`: each part is one archive. Its entities are permanent, which a prefill writes only with `--allow-permanent`, and its `chainId` must be the genesis file's. Every other step below is the same, with the same flags on each run. See [golemdb-genesis-prefill.md](golemdb-genesis-prefill.md) for the format's checks, measurements and how to run the full export.
+
 ## 2. Run the prefill
 
 ```bash
@@ -141,4 +143,5 @@ The node checks its store against the genesis file before anything else. Each re
 
 - [genesis-spec.md, `prefilledBlockZeroStateRoot`](genesis-spec.md#7-prefilledblockzerostateroot): the genesis field.
 - [`arkiv-prefill` crate docs](../crates/arkiv-prefill/src/lib.rs): the archive format and the archive hash.
+- [`arkiv_prefill::bundle`](../crates/arkiv-prefill/src/bundle.rs): the Sourcify bundle format; [golemdb-genesis-prefill.md](golemdb-genesis-prefill.md): prefilling one.
 - Tracking issue: [#311](https://github.com/Arkiv-Network/arkiv/issues/311).

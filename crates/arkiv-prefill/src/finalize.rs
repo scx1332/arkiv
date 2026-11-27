@@ -253,6 +253,7 @@ mod tests {
             genesis_hash: GENESIS,
             alloc: &alloc,
             archives: &archives,
+            allow_permanent: false,
         };
         let ran = run(&store, &plan, |_, _| {});
         assert_eq!(ran.is_ok(), done == total);

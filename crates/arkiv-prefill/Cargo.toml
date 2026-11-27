@@ -17,6 +17,8 @@ serde.workspace = true
 serde_json.workspace = true
 eyre.workspace = true
 base64 = "0.22"
+# A Sourcify bundle's report gives each part's SHA-256.
+sha2 = "0.10"
 # The writer runs every entity through the executor, on the store's own view,
 # priced by the store's fee schedule.
 arkiv-reth-executor.workspace = true

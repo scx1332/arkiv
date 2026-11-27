@@ -7,6 +7,11 @@
 //! arkiv-reth node    --chain genesis.json                                  # block 1 onwards
 //! ```
 //!
+//! The input is an archive set (`--archives set.json`) or a Sourcify bundle
+//! (`--seed seed.json`), whose parts are its archives: see
+//! [`arkiv_prefill::bundle`]. A Sourcify bundle's entities are permanent, which
+//! a prefill writes only with `--allow-permanent`.
+//!
 //! The store is GolemDB's directory, `--store` or `ARKIV_STORE_PATH` as for the
 //! node, opened with the same settings from the genesis file, so the roots the
 //! node later checks are the roots written here.
@@ -18,10 +23,10 @@ use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-use arkiv_prefill::{Prefill, finalize, open_set, run, set_prefilled_root};
+use arkiv_prefill::{Archive, Prefill, finalize, open_bundle, open_set, run, set_prefilled_root};
 use arkiv_reth_chainspec::{ArkivChainSpec, ArkivChainSpecParser};
 use arkiv_reth_statemanager::{GenesisAccount, HostStore, StoreState, classify};
-use clap::Parser;
+use clap::{ArgGroup, Parser};
 use eyre::{Context, bail, ensure};
 use reth_cli::chainspec::ChainSpecParser;
 use reth_ethereum::chainspec::EthChainSpec;
@@ -31,6 +36,7 @@ use crate::genesis::NodeChainSpecParser;
 /// Write a chain's prefill into GolemDB, then finalize block 0.
 #[derive(Debug, Parser)]
 #[command(name = "arkiv-reth prefill")]
+#[command(group(ArgGroup::new("input").required(true).args(["archives", "seed"])))]
 pub(crate) struct PrefillCommand {
     /// The chain's genesis file. `--finalize` writes block 0's state root into
     /// it, as `config.arkiv.prefilledBlockZeroStateRoot`.
@@ -38,7 +44,16 @@ pub(crate) struct PrefillCommand {
     chain: PathBuf,
     /// The archive set file: the archives' index files, in commit order.
     #[arg(long, value_name = "FILE")]
-    archives: PathBuf,
+    archives: Option<PathBuf>,
+    /// A Sourcify bundle's seed.json, instead of an archive set: each of its
+    /// parts is one archive, committed in the order seed.json gives.
+    #[arg(long, value_name = "FILE")]
+    seed: Option<PathBuf>,
+    /// Let entities be permanent (`$expiresAt` 2^64-1), as a Sourcify
+    /// bundle's are. No transaction can create a permanent entity; without
+    /// this flag, a prefill cannot either.
+    #[arg(long)]
+    allow_permanent: bool,
     /// Commit block 0 instead of archives. Only once every archive is in.
     #[arg(long)]
     finalize: bool,
@@ -55,6 +70,13 @@ pub(crate) fn main(args: impl IntoIterator<Item = OsString>) -> eyre::Result<()>
     command.execute(&mut std::io::stdout())
 }
 
+/// What the prefill reads: its archives, and what to call them.
+struct Input {
+    archives: Vec<Archive>,
+    /// What one archive is called in the output: an archive, or a bundle's part.
+    noun: &'static str,
+}
+
 impl PrefillCommand {
     /// Run, reporting progress to `out`.
     fn execute(&self, out: &mut impl std::io::Write) -> eyre::Result<()> {
@@ -63,23 +85,60 @@ impl PrefillCommand {
             .wrap_err_with(|| format!("read the genesis file {chain}"))?;
         let spec = ArkivChainSpecParser::parse(&text)
             .wrap_err_with(|| format!("parse the genesis file {chain}"))?;
-        let archives = open_set(&self.archives)?;
+        let input = self.input(out, &spec)?;
         let store = crate::open_store(&spec, Some(self.store.clone()), None)?;
-        let count = match archives.len() {
-            1 => "1 archive".to_owned(),
-            n => format!("{n} archives"),
+        if self.finalize {
+            self.finalize(out, &text, &spec, &store, &input.archives)
+        } else {
+            self.run(out, &spec, &store, &input)
+        }
+    }
+
+    /// Open the archive set or the bundle, and say what it holds.
+    fn input(&self, out: &mut impl std::io::Write, spec: &ArkivChainSpec) -> eyre::Result<Input> {
+        let chain_id = spec.chain().id();
+        if let Some(set) = &self.archives {
+            let archives = open_set(set)?;
+            writeln!(
+                out,
+                "chain {chain_id}: {} in {}",
+                plural(archives.len() as u64, "archive"),
+                set.display()
+            )?;
+            return Ok(Input {
+                archives,
+                noun: "archive",
+            });
+        }
+        let seed = self
+            .seed
+            .as_ref()
+            .expect("clap requires --archives or --seed");
+        let bundle = open_bundle(seed)?;
+        let entities = match bundle.entities {
+            Some(n) => format!("{} by report.json", plural(n, "entity")),
+            None => "no report.json, so parts are checked line by line only".to_owned(),
         };
         writeln!(
             out,
-            "chain {}: {count} in {}",
-            spec.chain().id(),
-            self.archives.display()
+            "chain {chain_id}: Sourcify bundle {}: {}, {entities}, created by {}",
+            seed.display(),
+            plural(bundle.archives.len() as u64, "part"),
+            bundle.owner,
         )?;
-        if self.finalize {
-            self.finalize(out, &text, &spec, &store, &archives)
-        } else {
-            self.run(out, &spec, &store, &archives)
-        }
+        // The writer refuses every part too; this refuses before anything,
+        // the alloc commit included, is written.
+        ensure!(
+            bundle.chain_id == chain_id,
+            "{}: the bundle's keys are minted for chain {}, but the genesis file is chain \
+             {chain_id}. Prefill a bundle exported (or re-keyed) for this chain",
+            seed.display(),
+            bundle.chain_id
+        );
+        Ok(Input {
+            archives: bundle.archives,
+            noun: "part",
+        })
     }
 
     fn run(
@@ -87,51 +146,56 @@ impl PrefillCommand {
         out: &mut impl std::io::Write,
         spec: &ArkivChainSpec,
         store: &HostStore,
-        archives: &[arkiv_prefill::Archive],
+        input: &Input,
     ) -> eyre::Result<()> {
+        let archives = &input.archives[..];
+        let noun = input.noun;
         let total = archives.len();
         match classify(store, [0; 32])? {
             StoreState::GolemDbInitialized => {
                 writeln!(
                     out,
-                    "store: empty; writing the genesis accounts, then the archives"
+                    "store: empty; writing the genesis accounts, then the {noun}s"
                 )?;
             }
             StoreState::ArkivPrefilling { done, total } => writeln!(
                 out,
-                "store: {done} of {total} archives in; checking nothing changed, then resuming"
+                "store: {done} of {total} {noun}s in; checking nothing changed, then resuming"
             )?,
             StoreState::ArkivPrefillDone => {
-                writeln!(out, "store: every archive is in; checking nothing changed")?;
+                writeln!(out, "store: every {noun} is in; checking nothing changed")?;
             }
             // `run` refuses these, saying why.
             _ => {}
         }
         let alloc = alloc(spec);
-        let prefill = prefill(spec, &alloc, archives);
+        let prefill = self.prefill(spec, &alloc, archives);
+        let mut progress = Progress::new(archives);
         let mut since = Instant::now();
-        let mut lines = Vec::new();
+        // Each archive is reported as it lands: a large prefill runs for hours.
+        let mut failed_write = None;
         let ran = run(store, &prefill, |place, written| {
-            let entities = match written.entities {
-                1 => "1 entity".to_owned(),
-                n => format!("{n} entities"),
-            };
-            lines.push(format!(
-                "{}  committed as commit {} · {entities} · {:.1} s · {}",
-                archives[place].index().display(),
+            let line = format!(
+                "{}  committed as commit {} · {} · {:.1} s · {}\n  {}",
+                archives[place].name().display(),
                 written.commit.0,
+                plural(written.entities, "entity"),
                 since.elapsed().as_secs_f64(),
-                written.hash
-            ));
+                written.hash,
+                progress.after(place, written.entities, noun),
+            );
+            if let Err(error) = writeln!(out, "{line}") {
+                failed_write.get_or_insert(error);
+            }
             since = Instant::now();
         });
-        for line in &lines {
-            writeln!(out, "{line}")?;
-        }
         ran?;
+        if let Some(error) = failed_write {
+            return Err(error.into());
+        }
         writeln!(
             out,
-            "{total} of {total} archives in. Run again with --finalize to commit block 0."
+            "{total} of {total} {noun}s in. Run again with --finalize to commit block 0."
         )?;
         Ok(())
     }
@@ -142,7 +206,7 @@ impl PrefillCommand {
         text: &str,
         spec: &ArkivChainSpec,
         store: &HostStore,
-        archives: &[arkiv_prefill::Archive],
+        archives: &[Archive],
     ) -> eyre::Result<()> {
         // Block 0 is what the store holds, so the archives given must be the
         // ones it was prefilled from: the same checks as a resume (genesis
@@ -150,7 +214,7 @@ impl PrefillCommand {
         // `run` only checks; any other state `finalize` refuses below.
         if matches!(classify(store, [0; 32])?, StoreState::ArkivPrefillDone) {
             let alloc = alloc(spec);
-            run(store, &prefill(spec, &alloc, archives), |_, _| {})?;
+            run(store, &self.prefill(spec, &alloc, archives), |_, _| {})?;
         }
         let published = spec.prefilled_block_zero_state_root();
         let mut with_root = None;
@@ -187,22 +251,131 @@ impl PrefillCommand {
         writeln!(out, "Start the chain with: arkiv-reth node --chain {chain}")?;
         Ok(())
     }
+
+    fn prefill<'a>(
+        &self,
+        spec: &ArkivChainSpec,
+        alloc: &'a [GenesisAccount],
+        archives: &'a [Archive],
+    ) -> Prefill<'a> {
+        Prefill {
+            chain_id: spec.chain().id(),
+            genesis_hash: spec.prefill_genesis_hash().0,
+            alloc,
+            archives,
+            allow_permanent: self.allow_permanent,
+        }
+    }
 }
 
 fn alloc(spec: &ArkivChainSpec) -> Vec<GenesisAccount> {
     GenesisAccount::from_alloc(&spec.genesis().alloc).collect()
 }
 
-fn prefill<'a>(
-    spec: &ArkivChainSpec,
-    alloc: &'a [GenesisAccount],
-    archives: &'a [arkiv_prefill::Archive],
-) -> Prefill<'a> {
-    Prefill {
-        chain_id: spec.chain().id(),
-        genesis_hash: spec.prefill_genesis_hash().0,
-        alloc,
-        archives,
+/// `n` and `noun`, plural unless `n` is 1: "1 entity", "3 entities".
+fn plural(n: u64, noun: &str) -> String {
+    match (n, noun.strip_suffix('y')) {
+        (1, _) => format!("1 {noun}"),
+        (_, Some(stem)) => format!("{n} {stem}ies"),
+        (_, None) => format!("{n} {noun}s"),
+    }
+}
+
+/// How far a run is, for the line after each archive: what it has written,
+/// how fast, and how long the rest should take at that pace.
+struct Progress {
+    /// Each archive's size: the bytes of its parts.
+    sizes: Vec<u64>,
+    started: Instant,
+    /// Written by this run, which may have resumed after other archives.
+    bytes: u64,
+    entities: u64,
+}
+
+impl Progress {
+    fn new(archives: &[Archive]) -> Self {
+        let size = |archive: &Archive| {
+            archive
+                .parts()
+                .iter()
+                .filter_map(|part| std::fs::metadata(part).ok())
+                .map(|meta| meta.len())
+                .sum()
+        };
+        Self {
+            sizes: archives.iter().map(size).collect(),
+            started: Instant::now(),
+            bytes: 0,
+            entities: 0,
+        }
+    }
+
+    /// The line after archive `place` landed with `entities` entities.
+    fn after(&mut self, place: usize, entities: u64, noun: &str) -> String {
+        self.bytes += self.sizes[place];
+        self.entities += entities;
+        let elapsed = self.started.elapsed().as_secs_f64();
+        let rate = self.bytes as f64 / elapsed.max(1e-3);
+        let left: u64 = self.sizes[place + 1..].iter().sum();
+        let mut line = format!(
+            "{} of {} {noun}s · this run: {} in {}, {:.1} MB/s, {:.0} entities/s · ETA {}",
+            place + 1,
+            self.sizes.len(),
+            plural(self.entities, "entity"),
+            duration(elapsed),
+            rate / 1e6,
+            self.entities as f64 / elapsed.max(1e-3),
+            duration(left as f64 / rate.max(1.0)),
+        );
+        if let Some(memory) = Memory::now() {
+            line.push_str(&format!(
+                " · memory {} MiB, mapped files {} MiB",
+                memory.anonymous >> 20,
+                memory.mapped >> 20
+            ));
+        }
+        line
+    }
+}
+
+/// `seconds` as `1h 02m`, `3m 04s` or `5.0 s`.
+fn duration(seconds: f64) -> String {
+    let whole = seconds as u64;
+    match whole {
+        0..60 => format!("{seconds:.1} s"),
+        60..3600 => format!("{}m {:02}s", whole / 60, whole % 60),
+        _ => format!("{}h {:02}m", whole / 3600, whole % 3600 / 60),
+    }
+}
+
+/// The process's resident memory, where the OS says (Linux), in two parts
+/// that grow differently: its own memory, which holds one archive's writes at
+/// a time, and the pages of its memory-mapped files, mostly GolemDB's store,
+/// which grow with the store and which the kernel takes back when it needs
+/// them, as it does any file cache.
+struct Memory {
+    anonymous: u64,
+    mapped: u64,
+}
+
+impl Memory {
+    fn now() -> Option<Self> {
+        let status = std::fs::read_to_string("/proc/self/status").ok()?;
+        let bytes = |field: &str| -> Option<u64> {
+            let kib = status
+                .lines()
+                .find_map(|line| line.strip_prefix(field))?
+                .trim()
+                .strip_suffix("kB")?
+                .trim()
+                .parse::<u64>()
+                .ok()?;
+            Some(kib << 10)
+        };
+        Some(Self {
+            anonymous: bytes("RssAnon:")?,
+            mapped: bytes("RssFile:")? + bytes("RssShmem:").unwrap_or(0),
+        })
     }
 }
 
@@ -278,7 +451,9 @@ mod tests {
         fn command(&self, store: &str, finalize: bool) -> PrefillCommand {
             PrefillCommand {
                 chain: self.path("genesis.json"),
-                archives: self.path("set.json"),
+                archives: Some(self.path("set.json")),
+                seed: None,
+                allow_permanent: false,
                 finalize,
                 store: self.path(store).into_os_string(),
             }
@@ -408,6 +583,152 @@ mod tests {
         let printed = setup.run("audit", true).unwrap();
         assert!(printed.contains("it matches"), "{printed}");
         assert_eq!(setup.genesis(), published, "the file is not rewritten");
+    }
+
+    /// The committed Sourcify fixture, copied into a new directory: the prefill
+    /// writes its store there, and `--finalize` its genesis file.
+    fn sourcify() -> tempfile::TempDir {
+        fn copy(from: &Path, to: &Path) {
+            std::fs::create_dir_all(to).unwrap();
+            for entry in std::fs::read_dir(from).unwrap() {
+                let entry = entry.unwrap();
+                let target = to.join(entry.file_name());
+                if entry.file_type().unwrap().is_dir() {
+                    copy(&entry.path(), &target);
+                } else {
+                    std::fs::copy(entry.path(), target).unwrap();
+                }
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        copy(
+            &Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../crates/arkiv-prefill/fixtures/sourcify"),
+            dir.path(),
+        );
+        dir
+    }
+
+    /// `arkiv-reth prefill --seed` on the bundle in `dir`; what it printed, or
+    /// its error.
+    fn seed(
+        dir: &Path,
+        store: &str,
+        allow_permanent: bool,
+        finalize: bool,
+    ) -> Result<String, String> {
+        let command = PrefillCommand {
+            chain: dir.join("genesis.json"),
+            archives: None,
+            seed: Some(dir.join("seed.json")),
+            allow_permanent,
+            finalize,
+            store: dir.join(store).into_os_string(),
+        };
+        let mut out = Vec::new();
+        let result = command.execute(&mut out);
+        let printed = String::from_utf8(out).unwrap();
+        result.map(|()| printed).map_err(|e| format!("{e:#}"))
+    }
+
+    /// The fixture's block 0 root and hash, from its `expected.json`.
+    fn sourcify_expected() -> (alloy_primitives::B256, alloy_primitives::B256) {
+        let expected: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../crates/arkiv-prefill/fixtures/sourcify/expected.json"
+        ))
+        .unwrap();
+        let field = |name: &str| expected[name].as_str().unwrap().parse().unwrap();
+        (field("root"), field("blockZeroHash"))
+    }
+
+    /// A Sourcify bundle prefills part by part, its permanent entities only
+    /// with `--allow-permanent`, and resumes after a run without it. Finalized,
+    /// it is the fixture's block 0, and the node accepts the store under the
+    /// genesis file the finalize wrote.
+    #[test]
+    fn a_sourcify_bundle_prefills_and_the_node_starts_on_it() {
+        let work = sourcify();
+        let dir = work.path();
+
+        // Without --allow-permanent: refused at the first line, after the
+        // alloc commit; the store waits to resume.
+        let error = seed(dir, "golemdb", false, false).unwrap_err();
+        assert!(
+            error.contains("entities/000001.jsonl:1: refused: a permanent expiry, which a prefill writes only when it is allowed to (--allow-permanent)"),
+            "{error}"
+        );
+
+        let printed = seed(dir, "golemdb", true, false).unwrap();
+        assert!(
+            printed.starts_with("chain 7706815: Sourcify bundle ")
+                && printed.contains("2 parts, 9 entities by report.json, created by 0xf39F"),
+            "{printed}"
+        );
+        assert!(
+            printed.contains("store: 0 of 2 parts in; checking nothing changed, then resuming"),
+            "{printed}"
+        );
+        assert!(
+            printed.contains("entities/000001.jsonl  committed as commit 2 · 6 entities")
+                && printed.contains("entities/000002.jsonl  committed as commit 3 · 3 entities")
+                && printed.contains("2 of 2 parts · this run: 9 entities in"),
+            "{printed}"
+        );
+        assert!(
+            printed.ends_with("2 of 2 parts in. Run again with --finalize to commit block 0.\n"),
+            "{printed}"
+        );
+
+        let printed = seed(dir, "golemdb", false, true).unwrap();
+        let (root, hash) = sourcify_expected();
+        assert!(
+            printed.contains(&format!(
+                "block 0 committed as commit 4: state root {root}, hash {hash}"
+            )),
+            "{printed}"
+        );
+
+        let genesis = std::fs::read_to_string(dir.join("genesis.json")).unwrap();
+        let node = NodeChainSpecParser::parse(&genesis).unwrap();
+        assert_eq!(node.prefilled_block_zero_state_root(), Some(root));
+        assert_eq!(node.genesis_hash(), hash);
+        let store =
+            crate::open_store(&node, Some(dir.join("golemdb").into_os_string()), None).unwrap();
+        assert_eq!(
+            prepare_genesis(&store, hash.0, Some(node.prefill_genesis_hash().0), []).unwrap(),
+            None
+        );
+        check_genesis_root(&store, hash.0, root.0).unwrap();
+
+        // Seeding the same bundle again, into another store, gives the same
+        // block 0: an audit of the published root.
+        seed(dir, "audit", true, false).unwrap();
+        let printed = seed(dir, "audit", true, true).unwrap();
+        assert!(
+            printed.contains(&format!("state root {root}, hash {hash}"))
+                && printed.contains("it matches"),
+            "{printed}"
+        );
+    }
+
+    /// A bundle minted for another chain is refused before anything is
+    /// written, the alloc commit included.
+    #[test]
+    fn a_bundle_for_another_chain_writes_nothing() {
+        let work = sourcify();
+        let dir = work.path();
+        let genesis = std::fs::read_to_string(dir.join("genesis.json"))
+            .unwrap()
+            .replace("\"chainId\": 7706815", "\"chainId\": 7706816");
+        std::fs::write(dir.join("genesis.json"), genesis).unwrap();
+        let error = seed(dir, "golemdb", true, false).unwrap_err();
+        assert!(
+            error.contains(
+                "the bundle's keys are minted for chain 7706815, but the genesis file is chain 7706816"
+            ),
+            "{error}"
+        );
+        assert!(!dir.join("golemdb").exists(), "no store was opened");
     }
 
     /// The genesis file is replaced whole: nothing is left beside it.

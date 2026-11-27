@@ -50,6 +50,9 @@ pub struct Prefill<'a> {
     pub alloc: &'a [GenesisAccount],
     /// The archives, in order.
     pub archives: &'a [Archive],
+    /// Whether entities may be permanent: see
+    /// [`ExecEnv::allow_permanent`](arkiv_interfaces::execution::ExecEnv::allow_permanent).
+    pub allow_permanent: bool,
 }
 
 /// What a run did.
@@ -108,7 +111,8 @@ pub fn run(
         .enumerate()
         .skip(resumed_from as usize)
     {
-        let archive_written = write_archive(store, archive, prefill.chain_id)?;
+        let archive_written =
+            write_archive(store, archive, prefill.chain_id, prefill.allow_permanent)?;
         on_written(place, &archive_written);
         written.push(archive_written);
     }
@@ -187,7 +191,7 @@ fn check(store: &HostStore, prefill: &Prefill, done: u64) -> Result<()> {
         head.0,
         tag.map_or_else(|| "nothing".to_owned(), |tag| B256::from(tag).to_string()),
         done,
-        archive.index().display()
+        archive.name().display()
     );
     Ok(())
 }
@@ -237,6 +241,7 @@ mod tests {
             genesis_hash: GENESIS,
             alloc,
             archives,
+            allow_permanent: false,
         }
     }
 

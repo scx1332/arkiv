@@ -1149,6 +1149,8 @@ fn arkiv_entity_transact<DB: Database>(
         // block's branch, one probe after another: their writes must not
         // outlive the probe.
         keep_writes: fees.charge,
+        // Permanence is not sold: only a prefill may allow it.
+        allow_permanent: false,
     };
     let outcome = match decode_ops(&env, &tx.data, start_nonce.value) {
         Ok(ops) => run_ops(&mut view, op_cost, schedule, &env, ops)

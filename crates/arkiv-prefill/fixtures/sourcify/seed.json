@@ -1,0 +1,16 @@
+{
+  "version": 2,
+  "format": "sourcify-arkiv.udc-bundle.v1",
+  "chainId": 7706815,
+  "owner": "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266",
+  "schemaPrefix": "sourcify.v4",
+  "firstNonce": 0,
+  "entities": [
+    {
+      "path": "entities/000001.jsonl"
+    },
+    {
+      "path": "entities/000002.jsonl"
+    }
+  ]
+}

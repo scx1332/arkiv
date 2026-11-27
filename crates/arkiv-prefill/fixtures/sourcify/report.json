@@ -1,0 +1,18 @@
+{
+  "schema": "sourcify-udc-import.v1",
+  "status": "completed",
+  "format": "sourcify-arkiv.udc-bundle.v1",
+  "sourceChainId": 1,
+  "arkivChainId": 7706815,
+  "owner": "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266",
+  "schemaPrefix": "sourcify.v4",
+  "records": 2,
+  "contracts": 2,
+  "entities": 9,
+  "kinds": {"chunk": 1, "code": 3, "compilation": 1, "contract": 2, "source": 2},
+  "expiry": "permanent (expiresAt 2^64-1)",
+  "parts": [
+    {"path":"entities/000001.jsonl","bytes":5918,"sha256":"d01487a4e927f978bba00b30ced75f6463fd802847e957b45cfad9a98dfd6527","entities":6,"firstNonce":0},
+    {"path":"entities/000002.jsonl","bytes":3085,"sha256":"c8043e9770a64db39c39a7feb75c8207366861a3a7cf2e5537d5293aa4c21e28","entities":3,"firstNonce":6}
+  ]
+}

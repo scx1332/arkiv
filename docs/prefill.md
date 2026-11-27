@@ -158,12 +158,16 @@ On the fixture, it prints:
 ```text
 chain 424242: 2 archives in set.json
 store: empty; writing the genesis accounts, then the archives
-A0/index.json  committed as commit 2 · 3 entities · 0.1 s · 0xd4d2a083…2e34
+A0/index.json  committed as commit 2 · 3 entities · 0.0 s · 0xd4d2a083…2e34
+  1 of 2 archives · this run: 3 entities in 0.0 s, 0.2 MB/s, 716 entities/s · ETA 0.0 s · memory 4 MiB, mapped files 45 MiB
 A1/index.json  committed as commit 3 · 3 entities · 0.0 s · 0x187c4045…fd9d
+  2 of 2 archives · this run: 6 entities in 0.0 s, 0.3 MB/s, 908 entities/s · ETA 0.0 s · memory 4 MiB, mapped files 45 MiB
 2 of 2 archives in. Run again with --finalize to commit block 0.
 ```
 
 The hash at the end of each archive's line is that archive's hash. It is computed from the exact bytes of the index file and the parts. The prefill stores it with the commit, which is how a later run knows which archives are already done.
+
+Each archive's line is printed as soon as it is committed, and followed by one on the run's progress: how many archives are in, what this run has written and how fast, the time the rest should take at that pace (from the parts' sizes), and the process's memory: its own, which holds one archive's writes at a time, and the pages of its memory-mapped files, mostly GolemDB's store, which grow with the store and which the kernel takes back like any file cache. A large prefill runs for hours, and this is how you follow it.
 
 > [!WARNING]
 > **The store path must be absolute.** It can also start with `~`. If you pass a relative path such as `--store golemdb`, the prefill stops with `the GolemDB directory must be an absolute path, such as ARKIV_STORE_PATH=/var/lib/arkiv/golemdb or ~/arkiv/golemdb`. The same rule applies to `ARKIV_STORE_PATH` when you start the node.
@@ -286,6 +290,8 @@ A3/index.json  committed as commit 5 · 1000 entities · 3.3 s
 4 of 4 archives in. Run again with --finalize to commit block 0.
 ```
 
+(Shortened: the archive hashes and the progress lines are left out.)
+
 After finalizing, the resumed store had the same block 0 root and hash as a run of the same files that was never interrupted. A prefill that stops part way costs you the time of the archive it was writing, and nothing else. You do not need to start again, and you do not need to clean anything up first.
 
 The same is true while finalizing. Block 0's commit is made in one step, so if the process dies before it, run `--finalize` again. If it dies after the commit but before the genesis file is written, the store already knows the root, and the section on finalizing above shows how to get it back.
@@ -330,6 +336,29 @@ A node that wants to join the chain starts from a copy of the block 0 store, `go
 
 > [!WARNING]
 > **The genesis file and the store must come from the same prefill.** The node checks this before it does anything else, and each kind of mismatch has its own error message. This covers an empty store, a prefill that is unfinished or not finalized, a genesis file that was edited after the prefill or that dates from before `--finalize`, a store finalized from different archives, and a store from another chain. The [runbook](prefill-runbook.md#when-the-node-refuses-to-start) lists every message and what to do about each one.
+
+## 8. A Sourcify bundle instead of archives
+
+The Sourcify export publishes its data as a bundle (`seed.json`, `report.json` and JSON Lines parts in a format of its own), and the prefill reads it as it is, with `--seed` in place of `--archives`. Each part is one archive. The bundle's entities are permanent, which no transaction can buy and a prefill writes only with `--allow-permanent`:
+
+```bash
+arkiv-reth prefill --chain genesis.json --seed bundle/seed.json --allow-permanent --store "$PWD/golemdb"
+arkiv-reth prefill --chain genesis.json --seed bundle/seed.json --allow-permanent --store "$PWD/golemdb" --finalize
+```
+
+On the fixture in [`crates/arkiv-prefill/fixtures/sourcify`](../crates/arkiv-prefill/fixtures/sourcify), the first command prints:
+
+```text
+chain 7706815: Sourcify bundle bundle/seed.json: 2 parts, 9 entities by report.json, created by 0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266
+store: empty; writing the genesis accounts, then the parts
+entities/000001.jsonl  committed as commit 2 · 6 entities · 0.0 s · 0xe2e2f8be…336c
+  1 of 2 parts · this run: 6 entities in 0.0 s, 1.2 MB/s, 1171 entities/s · ETA 0.0 s · memory 4 MiB, mapped files 44 MiB
+entities/000002.jsonl  committed as commit 3 · 3 entities · 0.0 s · 0xee3cdc0a…b7ed
+  2 of 2 parts · this run: 9 entities in 0.0 s, 1.1 MB/s, 1072 entities/s · ETA 0.0 s · memory 4 MiB, mapped files 44 MiB
+2 of 2 parts in. Run again with --finalize to commit block 0.
+```
+
+Everything else on this page holds for a bundle too, with the same flags on every run. What a bundle's lines look like, what is checked on top (each key is the one its nonce mints for the owner, the nonces run on across the parts, each part is the one `report.json` describes), and how the full export runs are in [golemdb-genesis-prefill.md](golemdb-genesis-prefill.md).
 
 ## Summary of the gotchas
 

@@ -1562,6 +1562,7 @@ dependencies = [
  "eyre",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "tempfile",
 ]
 
@@ -1596,6 +1597,7 @@ dependencies = [
  "arkiv-reth-rpc",
  "arkiv-reth-statemanager",
  "arkiv-tokenomics",
+ "base64 0.22.1",
  "clap",
  "eyre",
  "reth",
