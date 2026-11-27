@@ -224,7 +224,20 @@ Results on this branch: `cargo fmt --check` clean; `cargo clippy --all-targets -
 
 1. **Permanent prefilled entities vs #338.** #338 decided that "the executor still refuses the permanent value" for prefill. The Sourcify data is permanent by design, so this adds an explicit, off-by-default exemption (`--allow-permanent`). Needs upstream sign-off; the alternative is a finite far-future expiry chosen by the export, which would need a pricing story for storage time that overflows 64-bit gas.
 2. **The `key` cell type changes state roots** for every create or patch that writes a `key` attribute. A chain already running v1.0.x on GolemDB with key attributes would fork on upgrade: it needs a coordinated upgrade (or the new type gated by block height), or only new chains get it. Old `key` cells keep reading back as `bytes32`. Worth deciding before upstream merges either PR.
-3. **golemdb is pinned to a fork commit** (`scx1332/golemdb@4fb9437`, v1.0.0 + one commit) until the change lands upstream and is tagged; then switch back to `Arkiv-Network/golemdb` at that tag. The same commit applies cleanly to golemdb `main` (tested), which is where its PR should go; arkiv main itself still pins `v1.0.0`, and golemdb `main` has breaking changes (flat index, #108) that arkiv has not taken yet.
+3. **golemdb is pinned to a fork commit** (`scx1332/golemdb@4fb94375985b979672f4eb511e58ca3f3a025061`, v1.0.0 + one commit) until the change lands upstream and is tagged; then switch back to `Arkiv-Network/golemdb` at that tag. The same commit applies cleanly to golemdb `main` (tested), which is where its PR should go; arkiv main itself still pins `v1.0.0`, and golemdb `main` has breaking changes (flat index, #108) that arkiv has not taken yet.
+
+   **That commit is not on GitHub yet.** The token used for this work may push to `scx1332/arkiv` but not to `scx1332/golemdb` (HTTP 403), so the golemdb branch exists only in the local clone `~/scx1332/golemdb` (branch `scx1332/golemdb-genesis-prefill`, plus `scx1332/golemdb-key-cell-type-main`, the same commit on golemdb `main`, in the worktree `~/scx1332/prefill-work/golemdb-main`; a patch is at `~/scx1332/prefill-work/0001-feat-cells-a-key-cell-type-so-a-record-reference-is-.patch`). Until it is pushed, a clean build of this branch cannot fetch golemdb. To publish it:
+
+   ```bash
+   cd ~/scx1332/golemdb && git push origin scx1332/golemdb-genesis-prefill
+   ```
+
+   Before that, this branch builds against the local clone with git's URL rewrite, which leaves `Cargo.lock` naming the GitHub URL and the same commit:
+
+   ```bash
+   GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=url.file://$HOME/scx1332/golemdb.insteadOf \
+   GIT_CONFIG_VALUE_0=https://github.com/scx1332/golemdb CARGO_NET_GIT_FETCH_WITH_CLI=true cargo build
+   ```
 4. **Commit granularity is the export's part size** (10,000 entities). Fine for the current export; there is no `--commit-every`, since a different split gives a different block 0. If an export ever writes parts too large for memory, the fix belongs in the export.
 5. **`report.json` is optional.** Without it, parts are checked line by line only (keys, nonces). `SHA256SUMS` is not read (the report already covers the parts, and `seed.json` is covered by every part's archive hash).
 6. **Counting everything** (`arkiv_getEntityCount` with no query) is linear in the store: tens of seconds at 16.8M entities. Not a prefill issue, but the Sourcify chain will see it.
