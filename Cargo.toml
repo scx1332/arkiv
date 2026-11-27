@@ -91,11 +91,13 @@ alloy-primitives = { version = "1.6", features = ["rlp"] }
 alloy-consensus = "2.5"
 alloy-evm = "0.39"
 
-golemdb-api = { git = "https://github.com/Arkiv-Network/golemdb", tag = "v1.0.0" }
-golemdb-cells = { git = "https://github.com/Arkiv-Network/golemdb", tag = "v1.0.0" }
-golemdb-pruning = { git = "https://github.com/Arkiv-Network/golemdb", tag = "v1.0.0" }
-golemdb-storage = { git = "https://github.com/Arkiv-Network/golemdb", tag = "v1.0.0" }
-golemdb-storage-mdbx = { git = "https://github.com/Arkiv-Network/golemdb", tag = "v1.0.0" }
+# GolemDB v1.0.0 plus its `key` cell type (scx1332/golemdb branch
+# scx1332/golemdb-genesis-prefill), until that lands upstream and is tagged.
+golemdb-api = { git = "https://github.com/scx1332/golemdb", rev = "4fb94375985b979672f4eb511e58ca3f3a025061" }
+golemdb-cells = { git = "https://github.com/scx1332/golemdb", rev = "4fb94375985b979672f4eb511e58ca3f3a025061" }
+golemdb-pruning = { git = "https://github.com/scx1332/golemdb", rev = "4fb94375985b979672f4eb511e58ca3f3a025061" }
+golemdb-storage = { git = "https://github.com/scx1332/golemdb", rev = "4fb94375985b979672f4eb511e58ca3f3a025061" }
+golemdb-storage-mdbx = { git = "https://github.com/scx1332/golemdb", rev = "4fb94375985b979672f4eb511e58ca3f3a025061" }
 
 # alloy RPC client stack used by arkiv-cli (talks to a node over JSON-RPC) and
 # arkiv-genesis (mnemonic-derived dev signers). Kept on the same 2.5 line reth

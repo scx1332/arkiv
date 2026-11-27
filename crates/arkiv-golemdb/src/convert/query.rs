@@ -133,22 +133,21 @@ fn children_of(children: &[Filter]) -> Result<Vec<golemdb::Filter>, StoreError> 
     children.iter().map(node).collect()
 }
 
-/// One predicate as a leaf. `KEY` and `BYTES32` are one GolemDB type, so a
-/// leaf of either, a comparison or a presence test, matches both.
+/// One predicate as a leaf. Each type is GolemDB's own, as the cell holding it
+/// was written ([`cell_type`]): a `KEY` leaf never matches a `BYTES32` cell,
+/// nor the reverse.
 fn leaf(predicate: &Predicate) -> Result<golemdb::Filter, StoreError> {
     let field = cell_name(&predicate.cell);
+    let name = predicate.cell.as_bytes();
     let (op, type_id, value) = match &predicate.test {
         // `exists`/`typeof` are GolemDB's own `Exists` leaf, which takes the
         // type the same way: none for any, one for exactly that.
         Test::Exists { type_id } => {
             let ty = match type_id {
                 // Two conversions, each with its own error: Arkiv's type to
-                // GolemDB's, then that to an indexable one. For now `KEY` is
-                // the `bytes32` it is stored as, so `typeof(attr) = key` also
-                // finds the `bytes32` holders, as `typeof(attr) = bytes32`
-                // finds the `key` ones.
+                // GolemDB's, then that to an indexable one.
                 Some(type_id) => {
-                    Some(ExistsType::try_from(cell_type(*type_id)?).map_err(invalid_query)?)
+                    Some(ExistsType::try_from(cell_type(name, *type_id)?).map_err(invalid_query)?)
                 }
                 None => None,
             };
@@ -158,37 +157,38 @@ fn leaf(predicate: &Predicate) -> Result<golemdb::Filter, StoreError> {
         // inverted bounds as matching nothing, as the language does.
         Test::Between { type_id, low, high } => {
             let bounds = Bounds::try_new(
-                cell_type(*type_id)?,
-                Included(operand(*type_id, low)?),
-                Included(operand(*type_id, high)?),
+                cell_type(name, *type_id)?,
+                Included(operand(name, *type_id, low)?),
+                Included(operand(name, *type_id, high)?),
             )
             .map_err(invalid_query)?;
             return Ok(golemdb::Filter::Range { field, bounds });
         }
         Test::Compare { op, type_id, value } => (*op, *type_id, value),
     };
-    let bounds =
-        |lower, upper| Bounds::try_new(cell_type(type_id)?, lower, upper).map_err(invalid_query);
+    let bounds = |lower, upper| {
+        Bounds::try_new(cell_type(name, type_id)?, lower, upper).map_err(invalid_query)
+    };
     Ok(match op {
         CompareOp::Eq => golemdb::Filter::Eq {
             field,
-            value: EqValue::try_from(operand(type_id, value)?).map_err(invalid_query)?,
+            value: EqValue::try_from(operand(name, type_id, value)?).map_err(invalid_query)?,
         },
         CompareOp::Lt => golemdb::Filter::Range {
             field,
-            bounds: bounds(Unbounded, Excluded(operand(type_id, value)?))?,
+            bounds: bounds(Unbounded, Excluded(operand(name, type_id, value)?))?,
         },
         CompareOp::Lte => golemdb::Filter::Range {
             field,
-            bounds: bounds(Unbounded, Included(operand(type_id, value)?))?,
+            bounds: bounds(Unbounded, Included(operand(name, type_id, value)?))?,
         },
         CompareOp::Gt => golemdb::Filter::Range {
             field,
-            bounds: bounds(Excluded(operand(type_id, value)?), Unbounded)?,
+            bounds: bounds(Excluded(operand(name, type_id, value)?), Unbounded)?,
         },
         CompareOp::Gte => golemdb::Filter::Range {
             field,
-            bounds: bounds(Included(operand(type_id, value)?), Unbounded)?,
+            bounds: bounds(Included(operand(name, type_id, value)?), Unbounded)?,
         },
         CompareOp::Prefix => golemdb::Filter::Prefix {
             field,
@@ -207,18 +207,27 @@ fn sort_key(sort: &Sort) -> Result<golemdb::SortKey, StoreError> {
         SortDirection::Ascending => golemdb::Direction::Asc,
         SortDirection::Descending => golemdb::Direction::Desc,
     };
-    golemdb::SortKey::try_new(&sort.cell, cell_type(sort.type_id)?, direction)
-        .map_err(invalid_query)
+    golemdb::SortKey::try_new(
+        &sort.cell,
+        cell_type(sort.cell.as_bytes(), sort.type_id)?,
+        direction,
+    )
+    .map_err(invalid_query)
 }
 
 /// A predicate's operand encoded as [`golemdb_cell`] writes a cell, so a leaf
 /// finds what was stored. A field, which is what a leaf's values are.
-fn operand(type_id: TypeId, value: &[u8]) -> Result<golemdb::CellValue, StoreError> {
-    golemdb_cell(&Cell {
-        kind: CellKind::Field,
-        type_id,
-        value: value.to_vec(),
-    })
+/// A literal of `type_id` compared with the cell `name`, typed as that cell
+/// is stored.
+fn operand(name: &[u8], type_id: TypeId, value: &[u8]) -> Result<golemdb::CellValue, StoreError> {
+    golemdb_cell(
+        name,
+        &Cell {
+            kind: CellKind::Field,
+            type_id,
+            value: value.to_vec(),
+        },
+    )
 }
 
 /// Taken raw: GolemDB checks the name when the op runs.
@@ -237,7 +246,7 @@ mod tests {
     use crate::{GolemDbConfig, GolemDbStore};
     use arkiv_interfaces::entity_records::{MAX_RECORD_CELLS, MAX_RECORD_INDEXED_CELLS};
     use arkiv_interfaces::store::{Page, RecordKey, Store};
-    use golemdb_api::marker::{Bool, Bytes20, Bytes32, I32, Str, U64};
+    use golemdb_api::marker::{Bool, Bytes20, Bytes32, I32, RecordKey as Key, Str, U64};
     use golemdb_api::{Api, CellLimits, Genesis, HashAlgorithm, PricingConfig, RecordLimits};
     use std::ops::Bound;
     use tempfile::TempDir;
@@ -417,16 +426,19 @@ mod tests {
         );
     }
 
-    /// GolemDB stores a `key` as the 32 fixed bytes a `bytes32` is, so a
-    /// presence test for either is the `Exists` leaf of those bytes.
+    /// A `key` is GolemDB's own `key` type and a `bytes32` its 32 fixed
+    /// bytes, so a presence test for one is never one for the other.
     #[test]
-    fn a_presence_predicate_for_key_is_the_bytes32_leaf() {
-        for type_id in [TypeId::KEY, TypeId::BYTES32] {
+    fn a_presence_predicate_for_key_is_the_key_leaf() {
+        for (type_id, expected) in [
+            (TypeId::KEY, ExistsType::of(Key)),
+            (TypeId::BYTES32, ExistsType::of(Bytes32)),
+        ] {
             assert_eq!(
                 golemdb_filter(&presence("parent", Some(type_id))),
                 Ok(golemdb::Filter::Exists {
                     field: cell_name("parent"),
-                    ty: Some(ExistsType::of(Bytes32)),
+                    ty: Some(expected),
                 }),
                 "{type_id:?}"
             );
@@ -558,10 +570,18 @@ mod tests {
                 predicate("a", CompareOp::Gte, TypeId::BYTES32, &[0xab; 32]),
                 at_least(Bounds::new(Bytes32, Included([0xab; 32]), Unbounded)),
             ),
-            // A `key` is GolemDB's 32 fixed bytes, as a `bytes32` is.
+            // A `key` is GolemDB's `key`, not the `bytes32` above.
             (
                 predicate("a", CompareOp::Gte, TypeId::KEY, &[0xab; 32]),
-                at_least(Bounds::new(Bytes32, Included([0xab; 32]), Unbounded)),
+                at_least(Bounds::new(Key, Included([0xab; 32]), Unbounded)),
+            ),
+            // But the entity's own `$key` is still its 32 fixed bytes.
+            (
+                predicate("$key", CompareOp::Gte, TypeId::KEY, &[0xab; 32]),
+                golemdb::Filter::Range {
+                    field: cell_name("$key"),
+                    bounds: Bounds::new(Bytes32, Included([0xab; 32]), Unbounded),
+                },
             ),
         ] {
             assert_eq!(
@@ -673,12 +693,12 @@ mod tests {
                 .sort,
             [golemdb::SortKey::asc("n", Str)]
         );
-        // A `key` is the `bytes32` it is stored as.
+        // A `key` sorts as GolemDB's `key`.
         assert_eq!(
             query_op(&sorted_by_n(TypeId::KEY, SortDirection::Ascending), None)
                 .unwrap()
                 .sort,
-            [golemdb::SortKey::asc("n", Bytes32)]
+            [golemdb::SortKey::asc("n", Key)]
         );
     }
 

@@ -378,7 +378,7 @@ impl Store for GolemDbStore {
     ) -> Result<Metered<RecordKey>, StoreError> {
         let mut operation = golemdb::RecordOp::create(record_key(key), golemdb_budget(budget));
         for (name, cell) in &cells {
-            let value = golemdb_cell(cell)?;
+            let value = golemdb_cell(name.as_bytes(), cell)?;
             operation = match cell.kind {
                 CellKind::Attribute => operation.attribute(name, value),
                 CellKind::Field => operation.field(name, value),
@@ -443,7 +443,7 @@ impl Store for GolemDbStore {
                 // account and entity paths rely on, and gives it the kind it
                 // names, which is how an attribute becomes indexed.
                 CellChange::Set(cell) => {
-                    let value = golemdb_cell(cell)?;
+                    let value = golemdb_cell(name.as_bytes(), cell)?;
                     match cell.kind {
                         CellKind::Attribute => operation.attribute(name, value),
                         CellKind::Field => operation.field(name, value),

@@ -212,7 +212,7 @@ A prefilled chain's block 0 holds entities from archive files, written into Gole
     "chainId": 424242,
     "arkiv": {
       "golemdb": { "…": "…" },
-      "prefilledBlockZeroStateRoot": "0xd700bb5e793997aa20a009ec5924ddd02ad769da92b481ee4e02c08edc4d484c"
+      "prefilledBlockZeroStateRoot": "0x1f61d3b0ed02abfeb61b3f385cf3747ab0bc2b4ccfd6446d780fcff128e8e4fc"
     }
   }
 }

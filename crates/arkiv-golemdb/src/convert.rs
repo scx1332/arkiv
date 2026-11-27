@@ -147,14 +147,22 @@ pub(crate) fn immutable_data_address(address: SegmentAddress) -> golemdb::Immuta
     }
 }
 
-/// GolemDB has no key type, so `KEY` is stored as 32 fixed bytes.
-fn cell_type(type_id: TypeId) -> Result<CellType, StoreError> {
+/// GolemDB's type for Arkiv's `type_id`, in the cell `name`.
+///
+/// A `KEY` is GolemDB's own `key` type, a record reference, so it reads back
+/// as a `KEY` and a filter on one never matches a `bytes32`. The entity's own
+/// `$key` is the exception: every record has carried it as 32 fixed bytes
+/// since the first adapter, and keeps it, so a record without key attributes
+/// keeps its root. [`type_id`] reads it back as a `KEY` by its name.
+pub(crate) fn cell_type(name: &[u8], type_id: TypeId) -> Result<CellType, StoreError> {
     Ok(match type_id {
         TypeId::BOOL => CellType::Bool,
         TypeId::I32 => CellType::Int(Width::W4),
         TypeId::U256 => CellType::Uint(Width::W32),
         TypeId::DEC => CellType::Decimal(Width::W32),
-        TypeId::BYTES32 | TypeId::KEY => CellType::FixedBytes(Width::W32),
+        TypeId::KEY if name == annotations::KEY => CellType::FixedBytes(Width::W32),
+        TypeId::KEY => CellType::RecordKey,
+        TypeId::BYTES32 => CellType::FixedBytes(Width::W32),
         TypeId::BYTES => CellType::Bytes,
         TypeId::STR => CellType::Str,
         TypeId::U64 => CellType::Uint(Width::W8),
@@ -163,14 +171,16 @@ fn cell_type(type_id: TypeId) -> Result<CellType, StoreError> {
     })
 }
 
-/// The inverse of [`cell_type`]. A 32-byte cell reads back as `KEY` only for
-/// the entity's own `$key`.
+/// The inverse of [`cell_type`]. A fixed 32-byte cell reads back as `KEY`
+/// only for the entity's own `$key`. One written as `KEY` before GolemDB had
+/// a key type reads back as the `BYTES32` it was stored as.
 fn type_id(name: &[u8], cell_type: CellType) -> Result<TypeId, StoreError> {
     Ok(match cell_type {
         CellType::Bool => TypeId::BOOL,
         CellType::Int(Width::W4) => TypeId::I32,
         CellType::Uint(Width::W32) => TypeId::U256,
         CellType::Decimal(Width::W32) => TypeId::DEC,
+        CellType::RecordKey => TypeId::KEY,
         CellType::FixedBytes(Width::W32) if name == annotations::KEY => TypeId::KEY,
         CellType::FixedBytes(Width::W32) => TypeId::BYTES32,
         CellType::Bytes => TypeId::BYTES,
@@ -194,8 +204,9 @@ fn flips_sign(cell_type: CellType) -> bool {
     matches!(cell_type, CellType::Int(_) | CellType::Decimal(_))
 }
 
-pub(crate) fn golemdb_cell(cell: &Cell) -> Result<golemdb::CellValue, StoreError> {
-    let cell_type = cell_type(cell.type_id)?;
+/// The cell `cell`, named `name`, as GolemDB's.
+pub(crate) fn golemdb_cell(name: &[u8], cell: &Cell) -> Result<golemdb::CellValue, StoreError> {
+    let cell_type = cell_type(name, cell.type_id)?;
     let mut encoded = vec![cell_type.id()];
     encoded.extend_from_slice(&cell.value);
     if flips_sign(cell_type) && encoded.len() > 1 {

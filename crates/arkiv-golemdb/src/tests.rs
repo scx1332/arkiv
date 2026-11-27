@@ -303,18 +303,25 @@ fn golemdb_system_keys_hold_no_record() {
     }
 }
 
-/// GolemDB has no key type: only the entity's own `$key` comes back as `KEY`.
+/// Every `KEY` cell comes back as a `KEY`, the entity's own `$key` and a
+/// reference alike, and a `BYTES32` of the same bytes as a `BYTES32`.
 #[test]
-fn other_key_cells_read_back_as_bytes32() {
+fn key_cells_read_back_as_keys() {
     let dir = TempDir::new().unwrap();
     let store = open(&dir);
     let branch = store.begin(None).unwrap();
-    let cells = vec![("ref".into(), attribute(TypeId::KEY, &[5; 32]))];
+    let cells = vec![
+        ("$key".into(), attribute(TypeId::KEY, &[1; 32])),
+        ("hash".into(), attribute(TypeId::BYTES32, &[5; 32])),
+        ("ref".into(), attribute(TypeId::KEY, &[5; 32])),
+    ];
     store
         .create(branch, RecordKey([1; 32]), cells, None)
         .unwrap();
     let record = read(&store, ReadTarget::Branch(branch), 1).unwrap();
-    assert_eq!(record.cell("ref").unwrap().type_id, TypeId::BYTES32);
+    assert_eq!(record.cell("$key").unwrap().type_id, TypeId::KEY);
+    assert_eq!(record.cell("hash").unwrap().type_id, TypeId::BYTES32);
+    assert_eq!(record.cell("ref").unwrap().type_id, TypeId::KEY);
 }
 
 /// GolemDB takes a `BOOL` of 0 or 1 only, which is why Arkiv stores
@@ -908,17 +915,40 @@ fn a_failed_commit_leaves_no_tag_row() {
 fn signed_values_encode_as_golemdb_does() {
     let attribute_kind =
         |value: golemdb::CellValue| value.with_kind(golemdb::CellKind::Attribute).unwrap();
-    let int = convert::golemdb_cell(&attribute(TypeId::I32, &(-5i32).to_be_bytes()));
+    let int = convert::golemdb_cell(b"n", &attribute(TypeId::I32, &(-5i32).to_be_bytes()));
     assert_eq!(int, Ok(attribute_kind(golemdb::CellValue::from_i32(-5))));
 
     let mut minus_five = [0xff; 32];
     minus_five[31] = 0xfb;
-    let dec = convert::golemdb_cell(&attribute(TypeId::DEC, &minus_five));
+    let dec = convert::golemdb_cell(b"n", &attribute(TypeId::DEC, &minus_five));
     assert_eq!(
         dec,
         Ok(attribute_kind(golemdb::CellValue::from_dec256_unscaled_be(
             minus_five
         )))
+    );
+}
+
+/// A `key` attribute is GolemDB's `key` cell, a record reference, and a
+/// `bytes32` its 32 fixed bytes: the same bytes, two types. The entity's own
+/// `$key` stays the 32 fixed bytes it has always been, so a record with no
+/// key attribute keeps its root.
+#[test]
+fn a_key_attribute_is_a_golemdb_key_and_the_entitys_own_key_is_not() {
+    let reference = convert::golemdb_cell(b"parent", &attribute(TypeId::KEY, &[0xaa; 32]));
+    assert_eq!(
+        reference.map(|value| value.cell_type()),
+        Ok(golemdb::CellType::RecordKey)
+    );
+    let opaque = convert::golemdb_cell(b"parent", &attribute(TypeId::BYTES32, &[0xaa; 32]));
+    assert_eq!(
+        opaque.map(|value| value.cell_type()),
+        Ok(golemdb::CellType::FixedBytes(golemdb::Width::W32))
+    );
+    let own = convert::golemdb_cell(b"$key", &attribute(TypeId::KEY, &[0xaa; 32]));
+    assert_eq!(
+        own.map(|value| value.cell_type()),
+        Ok(golemdb::CellType::FixedBytes(golemdb::Width::W32))
     );
 }
 

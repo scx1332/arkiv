@@ -334,11 +334,10 @@ fn a_query_with_the_typeof_operator_matches_the_records_whose_attribute_has_that
     );
 }
 
-/// GolemDB stores a `key` as the 32 fixed bytes a `bytes32` is, so it cannot
-/// tell the two apart. For now `typeof(attr) = key` is the `bytes32` presence
-/// test, so it and `typeof(attr) = bytes32` both find both.
+/// A `key` and a `bytes32` holding the same bytes are two types: each typed
+/// predicate, a presence test, an equality or a range, finds only its own.
 #[test]
-fn typeof_key_and_typeof_bytes32_both_find_both() {
+fn key_and_bytes32_predicates_each_find_only_their_own_type() {
     let dir = TempDir::new().unwrap();
     let store = store_with(
         &dir,
@@ -360,15 +359,31 @@ fn typeof_key_and_typeof_bytes32_both_find_both() {
         ],
     );
 
-    for text in ["typeof(parent) = key", "typeof(parent) = bytes32"] {
-        assert_eq!(matched(&store, filter(text)), [1, 2], "{text}");
+    let aa = format!("0x{}", "aa".repeat(32));
+    let bb = format!("0x{}", "bb".repeat(32));
+    for (text, expected) in [
+        ("typeof(parent) = key".to_owned(), [1]),
+        ("typeof(parent) = bytes32".to_owned(), [2]),
+        (format!("parent = key({aa})"), [1]),
+        (format!("parent = bytes32({bb})"), [2]),
+        (format!("parent >= key({aa})"), [1]),
+        (format!("parent >= bytes32({aa})"), [2]),
+    ] {
+        assert_eq!(matched(&store, filter(&text)), expected, "{text}");
         assert_eq!(
             store
-                .count(None, &filter(text), None)
+                .count(None, &filter(&text), None)
                 .map(|count| count.into_value()),
-            Ok(2),
+            Ok(1),
             "{text}"
         );
+    }
+    // Neither type's literal finds the other's bytes.
+    for text in [
+        format!("parent = key({bb})"),
+        format!("parent = bytes32({aa})"),
+    ] {
+        assert!(matched(&store, filter(&text)).is_empty(), "{text}");
     }
 }
 

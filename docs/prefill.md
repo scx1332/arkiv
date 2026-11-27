@@ -196,8 +196,8 @@ On the fixture, it prints:
 
 ```text
 chain 424242: 2 archives in set.json
-block 0 committed as commit 4: state root 0xd700bb5e793997aa20a009ec5924ddd02ad769da92b481ee4e02c08edc4d484c, hash 0x5a79e960d4250df03decfdea1764d27c2833cf6e5a464331d7c01ad5325faaae
-wrote config.arkiv.prefilledBlockZeroStateRoot = 0xd700bb5e…484c into genesis.json
+block 0 committed as commit 4: state root 0x1f61d3b0ed02abfeb61b3f385cf3747ab0bc2b4ccfd6446d780fcff128e8e4fc, hash 0x2b96b017c6fc46eb42b3d31caca76a85886d3faafc89d7bdfc7658db965c0207
+wrote config.arkiv.prefilledBlockZeroStateRoot = 0x1f61d3b0…e4fc into genesis.json
 Start the chain with: arkiv-reth node --chain genesis.json
 ```
 
@@ -207,10 +207,10 @@ This may look circular, since the tag depends on the root. It works because tags
 
 ```mermaid
 flowchart LR
-  A[seal the empty commit] --> B[root 0xd700…]
+  A[seal the empty commit] --> B[root 0x1f61…]
   B --> C[genesis.json gets<br/>prefilledBlockZeroStateRoot]
-  C --> D[block 0 header → hash 0x5a79…]
-  D --> E[commit, tagged 0x5a79…<br/>the root does not change]
+  C --> D[block 0 header → hash 0x2b96…]
+  D --> E[commit, tagged 0x2b96…<br/>the root does not change]
 ```
 
 ### Where to find block 0's hash
@@ -220,14 +220,14 @@ The genesis file contains the state root, not the hash. The hash also covers the
 | Where | How |
 |---|---|
 | The finalize output | It is the `hash 0x…` on the first line of output, shown above. |
-| A store that is already finalized | Run `--finalize` again. It refuses, and its message gives both values: `the store's prefill is already finalized: block 0's root is 0xd700…, its hash 0x5a79…`. |
+| A store that is already finalized | Run `--finalize` again. It refuses, and its message gives both values: `the store's prefill is already finalized: block 0's root is 0x1f61…, its hash 0x2b96…`. |
 | A running node | Run `cast block 0 --field hash --rpc-url http://localhost:8545`. |
 | The published files | Run the audit in step 6, which rebuilds block 0 and prints the same line as the finalize. |
 
 > [!WARNING]
 > **A store can be finalized only once.** A second `--finalize` is refused, and it leaves the genesis file as it is.
 >
-> **If the genesis file could not be written,** for example because it is read-only, the disk is full, or the machine crashed between the commit and the write, do not run the prefill again. The error message gives you the root: `block 0 is committed, but writing genesis.json failed: … Add "prefilledBlockZeroStateRoot": "0xd700…" under config.arkiv by hand`. Add the field yourself. If you mistype it, the node notices when it starts, because it checks the root against the store.
+> **If the genesis file could not be written,** for example because it is read-only, the disk is full, or the machine crashed between the commit and the write, do not run the prefill again. The error message gives you the root: `block 0 is committed, but writing genesis.json failed: … Add "prefilledBlockZeroStateRoot": "0x1f61…" under config.arkiv by hand`. Add the field yourself. If you mistype it, the node notices when it starts, because it checks the root against the store.
 
 > [!IMPORTANT]
 > **Copy the store now, before any node runs on it.** Run `cp -R golemdb golemdb-block0`. This copy is what you publish for nodes that want to join. It holds exactly block 0, so anyone can check it against the genesis file. A store that a node has already run on has moved past block 0.
@@ -264,8 +264,8 @@ It does not change if you reformat a file. To check this, every file of the fixt
 
 ```text
                  archive A0      archive A1      block 0 root    block 0 hash
-as committed     0xd4d2a083…     0x187c4045…     0xd700bb5e…     0x5a79e960…
-reformatted      0x9649a76b…     0xdc39f5ca…     0xd700bb5e…     0x5a79e960…
+as committed     0xd4d2a083…     0x187c4045…     0x1f61d3b0…     0x2b96b017…
+reformatted      0x9649a76b…     0xdc39f5ca…     0x1f61d3b0…     0x2b96b017…
 ```
 
 The genesis file behaves the same way, because the prefill hashes a canonical form of it, with its keys sorted and the prefill field left out.
@@ -306,7 +306,7 @@ arkiv-reth prefill --chain genesis.json --archives set.json --store /tmp/audit -
 ```
 
 ```text
-block 0 committed as commit 4: state root 0xd700…484c, hash 0x5a79…aaae
+block 0 committed as commit 4: state root 0x1f61…e4fc, hash 0x2b96…0207
 it matches genesis.json's prefilledBlockZeroStateRoot
 ```
 

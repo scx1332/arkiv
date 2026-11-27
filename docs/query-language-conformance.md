@@ -22,7 +22,7 @@ changing the code and changing the spec).
 | ID | Item | Layer | Priority | Status |
 |---|---|---|---|---|
 | [Q1](#q1--not-fails-on-golemdb) | `NOT` fails on GolemDB with an internal error | GolemDB adapter, RPC | P1 | open |
-| [Q2](#q2--golemdb-treats-key-and-bytes32-as-one-type) | GolemDB treats `key` and `bytes32` as one type | GolemDB adapter | P1 | open |
+| [Q2](#q2--golemdb-treats-key-and-bytes32-as-one-type) | GolemDB treats `key` and `bytes32` as one type | GolemDB adapter | P1 | done |
 | [Q3](#q3--range-operators-only-on-numeric-types) | Range operators only on numeric types | parser, store | P1 | done |
 | [Q4](#q4---is-rejected) | `!=` is rejected | parser, AST | P2 | open |
 | [Q5](#q5--between-is-not-implemented) | `BETWEEN` is not implemented | lexer, parser, AST, store | P2 | done |
@@ -33,8 +33,8 @@ changing the code and changing the spec).
 | [S1–S6](#spec-text-issues) | Problems in the spec text itself | spec | P2 | open |
 | [D1–D2](#out-of-date-crate-docs) | Out-of-date crate docs | docs | P3 | in progress |
 
-Suggested order: Q1 and Q2 first, since they affect every deployment. Q3 and
-Q5 are done, and Q3 unblocks Q4.
+Suggested order: Q1 first, since it affects every deployment. Q2, Q3 and Q5
+are done, and Q3 unblocks Q4.
 
 ---
 
@@ -77,36 +77,38 @@ same entities as on the in-memory store.
 
 ## Q2 — GolemDB treats `key` and `bytes32` as one type
 
-**Status:** open · **Priority:** P1
+**Status:** done · **Priority:** P1
 
 **Spec:** a value predicate asserts the exact type. `parent = key(X)` never
 matches a `bytes32`-typed `parent`.
 
-**Code:** GolemDB stores a `key` as the same 32 fixed bytes as a `bytes32`,
-so the adapter cannot tell them apart:
-- `parent = key(X)` also matches a `bytes32`-typed `parent` holding `X`, and
-  the reverse. The same holds for the range comparisons Q3 enabled:
-  `parent > key(X)` also matches `bytes32`-typed `parent` values above `X`.
-- `typeof(x) = bytes32` also finds `key`-typed attributes, and for now
-  `typeof(x) = key` is mapped to the same `bytes32` presence test, so it also
-  finds `bytes32`-typed attributes.
+**Was:** GolemDB stored a `key` as the same 32 fixed bytes as a `bytes32`, so
+the adapter could not tell them apart: `parent = key(X)` also matched a
+`bytes32`-typed `parent` holding `X` (and the reverse, ranges included),
+`typeof(x) = key` and `typeof(x) = bytes32` each found both, and every `key`
+attribute read back as a `bytes32`.
+
+**Now:** GolemDB has a `key` cell type (id 5: 32 bytes, ordered as `bytes32`,
+its own type), and the adapter stores a `key` attribute as one, so each
+typed predicate finds only its own type and a `key` reads back as a `key`.
+The entity's own `$key` keeps the 32 fixed bytes it has always had, so a
+record without key attributes keeps its root; a `key` attribute written
+before the change reads back as the `bytes32` it was stored as.
 
 **Where:**
-- [`leaf`, crates/arkiv-golemdb/src/convert/query.rs:137-157](../crates/arkiv-golemdb/src/convert/query.rs#L137-L157)
-- Adapter test asserting both `typeof`s find both types: `typeof_key_and_typeof_bytes32_both_find_both` in
-  [crates/arkiv-golemdb/tests/query.rs](../crates/arkiv-golemdb/tests/query.rs)
+- [`cell_type`, crates/arkiv-golemdb/src/convert.rs](../crates/arkiv-golemdb/src/convert.rs)
+- GolemDB's `CellType::RecordKey`, in `golemdb-cells`.
+- Tests: `key_and_bytes32_predicates_each_find_only_their_own_type` in
+  [crates/arkiv-golemdb/tests/query.rs](../crates/arkiv-golemdb/tests/query.rs),
+  `key_cells_read_back_as_keys` in
+  [crates/arkiv-golemdb/src/tests.rs](../crates/arkiv-golemdb/src/tests.rs).
 
 **Tasks:**
-- [ ] Give `key` its own type in GolemDB, or carry the Arkiv type alongside
-      the value so the adapter can filter on it.
-- [x] Make `typeof(x) = key` answerable. For now it is the `bytes32` presence
-      test, so it is answered but also matches `bytes32`-typed attributes.
-- [ ] Add a GolemDB test: an entity with a `bytes32` attribute and one with a
+- [x] Give `key` its own type in GolemDB.
+- [x] Make `typeof(x) = key` answerable, finding only `key` attributes.
+- [x] Add a GolemDB test: an entity with a `bytes32` attribute and one with a
       `key` attribute holding the same bytes; each typed query finds only its
       own.
-
-**Done when:** `key` and `bytes32` predicates never match each other's
-attributes on GolemDB, and `typeof(x) = key` works.
 
 ---
 
