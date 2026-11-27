@@ -2061,11 +2061,15 @@ impl<N: ProviderNodeTypes<Primitives = reth_ethereum::EthPrimitives>> EngineProv
             );
         }
         if self.check_genesis_root {
-            check_genesis_root(
-                &self.store,
-                genesis_hash.0,
-                spec.genesis_header().state_root().0,
-            )?;
+            let root = spec.genesis_header().state_root();
+            check_genesis_root(&self.store, genesis_hash.0, root.0)?;
+            tracing::info!(
+                target: "arkiv-reth",
+                block = %genesis_hash,
+                %root,
+                prefilled = self.prefill.is_some(),
+                "the Arkiv store holds block 0, with the state root its header carries",
+            );
         }
 
         // Anchor the overlays on the store's head, not on reth's stage
